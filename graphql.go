@@ -153,21 +153,25 @@ func (c *Client) runWithJSON(ctx context.Context, req *Request, resp interface{}
 func (c *Client) runWithPostFields(ctx context.Context, req *Request, resp interface{}) error {
 	var requestBody bytes.Buffer
 	writer := multipart.NewWriter(&requestBody)
-	if err := writer.WriteField("query", req.q); err != nil {
-		return errors.Wrap(err, "write query field")
+
+	variables := make(map[string]interface{})
+	for k, v := range req.vars {
+		variables[k] = v
 	}
-	var variablesBuf bytes.Buffer
-	if len(req.vars) > 0 {
-		variablesField, err := writer.CreateFormField("variables")
-		if err != nil {
-			return errors.Wrap(err, "create variables field")
-		}
-		if err := json.NewEncoder(io.MultiWriter(variablesField, &variablesBuf)).Encode(req.vars); err != nil {
-			return errors.Wrap(err, "encode variables")
-		}
-	}
+
+	mappings := make(map[string][]string)
 	for i := range req.files {
-		part, err := writer.CreateFormFile(req.files[i].Field, req.files[i].Name)
+		is := fmt.Sprintf("%d", i)
+		arr, ok := mappings[is]
+		if ok {
+			arr = append(arr, fmt.Sprintf("variables.%s", req.files[i].Field))
+			mappings[is] = arr
+		} else {
+			mappings[is] = []string{fmt.Sprintf("variables.%s", req.files[i].Field)}
+		}
+		variables[req.files[i].Field] = nil
+
+		part, err := writer.CreateFormFile(is, req.files[i].Name)
 		if err != nil {
 			return errors.Wrap(err, "create form file")
 		}
@@ -175,10 +179,31 @@ func (c *Client) runWithPostFields(ctx context.Context, req *Request, resp inter
 			return errors.Wrap(err, "preparing file")
 		}
 	}
+
+	mapFWriter, err := writer.CreateFormField("map")
+	if err != nil {
+		return errors.Wrap(err, "write mappings field")
+	}
+	if err := json.NewEncoder(mapFWriter).Encode(mappings); err != nil {
+		return errors.Wrap(err, "write mappings field")
+	}
+
+	operations := make(map[string]interface{})
+	operations["query"] = req.q
+	operations["variables"] = variables
+	operationFWriter, err := writer.CreateFormField("operations")
+
+	if err != nil {
+		return errors.Wrap(err, "write operations field")
+	}
+	if err := json.NewEncoder(operationFWriter).Encode(operations); err != nil {
+		return errors.Wrap(err, "write operations field")
+	}
+
 	if err := writer.Close(); err != nil {
 		return errors.Wrap(err, "close writer")
 	}
-	c.logf(">> variables: %s", variablesBuf.String())
+	c.logf(">> variables: %s", variables)
 	c.logf(">> files: %d", len(req.files))
 	c.logf(">> query: %s", req.q)
 	gr := &graphResponse{
